@@ -3,7 +3,8 @@
 - Webserver (Designed by Gemini 3.7 Flash I believed if it's designed by me, it will worse than the 90's websites)
 - ESP32-Cam status such as: Realtime Temperature, PSRAM available, WiFi status, etc.
 - No SD Card needed to record the video!
-- 
+- It should use only RPi's RAM to keep and sent the files to R2
+  
 # Tested on
 ESP32-Cam 2MB PSRAM Unknown model name from Shopee + Raspberry Pi 4 
 
