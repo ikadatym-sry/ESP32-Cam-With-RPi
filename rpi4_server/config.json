@@ -6,20 +6,21 @@
   "esp32_cmd_url": "http://IP:8100/cmd",
   "esp32_ota_url": "http://IP:8100/update",
   "esp32_ota_password": "admin",
-  
+
   "r2_account_id": "",
   "r2_access_key_id": "",
   "r2_secret_access_key": "",
-  "r2_bucket_name": "",
+  "r2_bucket_name": "esp-cam1",
   
-  "r2_video_prefix": "recording/",
+  "r2_video_prefix": "record/",
   "r2_log_prefix": "logs/",
   
   "max_storage_gb": 8.0,
   "max_log_storage_mb": 500.0,
-  "log_auto_sync_hours": 6,
+  "log_auto_sync_minutes": 30,
   
   "ram_buffer_dir": "/dev/shm/esp32cam_clips",
   "record_post_motion_sec": 8,
+  "max_clip_duration_sec": 300,
   "web_port": 8088
 }

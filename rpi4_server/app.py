@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import json
 import time
@@ -8,6 +9,7 @@ import logging
 from datetime import datetime
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -15,7 +17,7 @@ import aiohttp
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -33,12 +35,12 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
 default_config = {
-    "esp32_ip": "defaultIP",
-    "esp32_stream_url": "http://defaultIP:8181/stream",
-    "esp32_status_url": "http://defaultIP:8100/status",
-    "esp32_logs_url": "http://defaultIP:8100/logs",
-    "esp32_cmd_url": "http://defaultIP:8100/cmd",
-    "esp32_ota_url": "http://defaultIP:8100/update",
+    "esp32_ip": "192.168.0.104",
+    "esp32_stream_url": "http://192.168.0.104:8181/stream",
+    "esp32_status_url": "http://192.168.0.104:8100/status",
+    "esp32_logs_url": "http://192.168.0.104:8100/logs",
+    "esp32_cmd_url": "http://192.168.0.104:8100/cmd",
+    "esp32_ota_url": "http://192.168.0.104:8100/update",
     "esp32_ota_password": "admin",
     "r2_account_id": "",
     "r2_access_key_id": "",
@@ -48,9 +50,10 @@ default_config = {
     "r2_log_prefix": "logs/",
     "max_storage_gb": 8.0,
     "max_log_storage_mb": 500.0,
-    "log_auto_sync_hours": 6,
+    "log_auto_sync_minutes": 360,
     "ram_buffer_dir": "/dev/shm/esp32cam_clips",
     "record_post_motion_sec": 8,
+    "max_clip_duration_sec": 300,
     "web_port": 8088
 }
 
@@ -74,10 +77,40 @@ ram_dir.mkdir(parents=True, exist_ok=True)
 # System Log in RAM
 ram_log_file = ram_dir / "system_events.log"
 
+def cleanup_ram_buffer(force_all=False):
+    """Guarantees RAM disk (/dev/shm) never exhausts physical memory (caps at 600MB)"""
+    try:
+        avi_files = sorted(ram_dir.glob("*.avi"), key=lambda p: p.stat().st_mtime)
+        if force_all:
+            for f in avi_files:
+                try: f.unlink()
+                except Exception: pass
+            return
+
+        total_bytes = sum(f.stat().st_size for f in avi_files)
+        # Cap RAM buffer to 600 MB (enough for multiple 5-min clips)
+        max_ram_bytes = 600 * 1024 * 1024
+        while total_bytes > max_ram_bytes and avi_files:
+            oldest = avi_files.pop(0)
+            total_bytes -= oldest.stat().st_size
+            try: oldest.unlink()
+            except Exception: pass
+    except Exception:
+        pass
+
+# Clean stale temp clips on startup
+cleanup_ram_buffer(force_all=True)
+
 def write_ram_log(msg: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}\n"
     try:
+        if ram_log_file.exists() and ram_log_file.stat().st_size > 200000:
+            with open(ram_log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-300:]
+            with open(ram_log_file, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+                
         with open(ram_log_file, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
@@ -91,7 +124,7 @@ def get_s2_client():
     access_key = config.get("r2_access_key_id")
     secret_key = config.get("r2_secret_access_key")
 
-    if not (account_id and access_key and secret_key):
+    if not (account_id and access_key and secret_key) or "YOUR_" in account_id or not account_id.strip():
         return None
 
     return boto3.client(
@@ -103,7 +136,7 @@ def get_s2_client():
     )
 
 # ==========================================
-# 3. PURE PYTHON LIGHTWEIGHT AVI MJPEG WRITER
+# 3. LEAN AVI MJPEG WRITER
 # ==========================================
 class AviMjpegWriter:
     def __init__(self, filepath: Path, width: int = 800, height: int = 600, fps: int = 20):
@@ -111,81 +144,100 @@ class AviMjpegWriter:
         self.width = width
         self.height = height
         self.fps = fps
-        self.file = open(filepath, "wb")
         self.frame_count = 0
         self.index_entries = []
         self.movi_start = 0
+        self.file = None
+        self.start_time = time.time()
 
-        self.file.write(b"\x00" * 256)
-        self.movi_start = self.file.tell()
+        try:
+            cleanup_ram_buffer()
+            self.file = open(filepath, "wb")
+            self.file.write(b"\x00" * 256)
+            self.movi_start = self.file.tell()
+        except OSError as e:
+            logger.warning(f"AVI Writer Init Failed: {e}")
+            cleanup_ram_buffer(force_all=True)
 
     def add_frame(self, jpeg_data: bytes):
-        if not jpeg_data:
+        if not jpeg_data or not self.file:
             return
-        offset = self.file.tell() - self.movi_start
-        size = len(jpeg_data)
-        pad = b"\x00" if (size % 2 != 0) else b""
+        try:
+            offset = self.file.tell() - self.movi_start
+            size = len(jpeg_data)
+            pad = b"\x00" if (size % 2 != 0) else b""
 
-        self.file.write(b"00dc")
-        self.file.write(struct.pack("<I", size))
-        self.file.write(jpeg_data)
-        if pad:
-            self.file.write(pad)
+            self.file.write(b"00dc")
+            self.file.write(struct.pack("<I", size))
+            self.file.write(jpeg_data)
+            if pad:
+                self.file.write(pad)
 
-        self.index_entries.append((b"00dc", 0x10, offset, size))
-        self.frame_count += 1
+            self.index_entries.append((b"00dc", 0x10, offset, size))
+            self.frame_count += 1
+        except OSError:
+            pass
 
     def close(self):
-        if self.frame_count == 0:
-            self.file.close()
-            try:
-                os.remove(self.filepath)
-            except OSError:
-                pass
+        if not self.file:
             return
 
-        idx_pos = self.file.tell()
-        self.file.write(b"idx1")
-        self.file.write(struct.pack("<I", len(self.index_entries) * 16))
-        for ckid, flags, offset, length in self.index_entries:
-            self.file.write(ckid)
-            self.file.write(struct.pack("<III", flags, offset, length))
+        try:
+            if self.frame_count == 0:
+                self.file.close()
+                self.index_entries.clear()
+                try: os.remove(self.filepath)
+                except OSError: pass
+                return
 
-        file_size = self.file.tell()
-        movi_size = idx_pos - self.movi_start
+            idx_pos = self.file.tell()
+            self.file.write(b"idx1")
+            self.file.write(struct.pack("<I", len(self.index_entries) * 16))
+            for ckid, flags, offset, length in self.index_entries:
+                self.file.write(ckid)
+                self.file.write(struct.pack("<III", flags, offset, length))
 
-        self.file.seek(0)
-        self.file.write(b"RIFF")
-        self.file.write(struct.pack("<I", file_size - 8))
-        self.file.write(b"AVI ")
+            self.index_entries.clear()
 
-        hdrl_data = bytearray()
-        us_per_frame = int(1000000 / self.fps)
-        avih = struct.pack(
-            "<IIIIIIIIIIIIII",
-            us_per_frame, 0, 0, 0x10, self.frame_count, 0, 1, 1024*1024,
-            self.width, self.height, 0, 0, 0, 0
-        )
-        hdrl_data += b"avih" + struct.pack("<I", len(avih)) + avih
+            file_size = self.file.tell()
+            movi_size = idx_pos - self.movi_start
 
-        strl_data = bytearray()
-        strh = struct.pack(
-            "<4s4sIIIIIIIIIIIIHH",
-            b"vids", b"MJPG", 0, 0, 0, 1, self.fps, 0, self.frame_count,
-            1024*1024, 0, 0, 0, 0, self.width, self.height
-        )
-        strl_data += b"strh" + struct.pack("<I", len(strh)) + strh
+            self.file.seek(0)
+            self.file.write(b"RIFF")
+            self.file.write(struct.pack("<I", file_size - 8))
+            self.file.write(b"AVI ")
 
-        strf = struct.pack(
-            "<IIIHH4sIIII",
-            40, self.width, self.height, 1, 24, b"MJPG", self.width * self.height * 3, 0, 0, 0
-        )
-        strl_data += b"strf" + struct.pack("<I", len(strf)) + strf
+            hdrl_data = bytearray()
+            us_per_frame = int(1000000 / self.fps)
+            avih = struct.pack(
+                "<IIIIIIIIIIIIII",
+                us_per_frame, 0, 0, 0x10, self.frame_count, 0, 1, 1024*1024,
+                self.width, self.height, 0, 0, 0, 0
+            )
+            hdrl_data += b"avih" + struct.pack("<I", len(avih)) + avih
 
-        hdrl_data += b"LIST" + struct.pack("<I", len(strl_data) + 4) + b"strl" + strl_data
-        self.file.write(b"LIST" + struct.pack("<I", len(hdrl_data) + 4) + b"hdrl" + hdrl_data)
-        self.file.write(b"LIST" + struct.pack("<I", movi_size + 4) + b"movi")
-        self.file.close()
+            strl_data = bytearray()
+            strh = struct.pack(
+                "<4s4sIIIIIIIIIIIIHH",
+                b"vids", b"MJPG", 0, 0, 0, 1, self.fps, 0, self.frame_count,
+                1024*1024, 0, 0, 0, 0, self.width, self.height
+            )
+            strl_data += b"strh" + struct.pack("<I", len(strh)) + strh
+
+            strf = struct.pack(
+                "<IIIHH4sIIII",
+                40, self.width, self.height, 1, 24, b"MJPG", self.width * self.height * 3, 0, 0, 0
+            )
+            strl_data += b"strf" + struct.pack("<I", len(strf)) + strf
+
+            hdrl_data += b"LIST" + struct.pack("<I", len(strl_data) + 4) + b"strl" + strl_data
+            self.file.write(b"LIST" + struct.pack("<I", len(hdrl_data) + 4) + b"hdrl" + hdrl_data)
+            self.file.write(b"LIST" + struct.pack("<I", movi_size + 4) + b"movi")
+            self.file.close()
+        except OSError:
+            try: self.file.close()
+            except Exception: pass
+            self.index_entries.clear()
 
 # ==========================================
 # 4. GLOBAL STATE
@@ -193,6 +245,9 @@ class AviMjpegWriter:
 class HubState:
     def __init__(self):
         self.latest_jpeg: Optional[bytes] = None
+        self.frame_id: int = 0
+        # Notifies HTTP consumers only when a new decoded camera frame arrives.
+        self.frame_event = asyncio.Event()
         self.latest_motion: bool = False
         self.latest_motion_score: int = 0
         self.last_frame_time: float = time.time()
@@ -201,8 +256,9 @@ class HubState:
         self.esp_online: bool = False
         self.current_writer: Optional[AviMjpegWriter] = None
         self.current_clip_path: Optional[Path] = None
+        self.recording_start_time: float = 0.0
         self.last_motion_time: float = 0.0
-        self.pre_buffer: deque = deque(maxlen=25)
+        self.pre_buffer: deque = deque(maxlen=15)
         self.esp32_telemetry: Dict[str, Any] = {}
         self.esp32_logs: List[str] = []
         self.last_reset_reason: str = "Unknown"
@@ -213,12 +269,14 @@ hub_state = HubState()
 # 5. ASYNC TASKS: STREAMING, RECORDING, R2 SYNC
 # ==========================================
 async def upload_to_r2_and_prune(clip_path: Path):
-    """Uploads recorded video clip to Cloudflare R2 & enforces 8GB limit"""
+    """Uploads recorded video clip to Cloudflare R2 and deletes RAM copy immediately"""
     try:
         s3 = get_s2_client()
         bucket = config.get("r2_bucket_name")
         if not s3 or not bucket:
-            write_ram_log(f"R2 not configured. Clip saved in RAM: {clip_path.name}")
+            if clip_path.exists():
+                clip_path.unlink()
+            cleanup_ram_buffer()
             return
 
         prefix = config.get("r2_video_prefix", "recordings/").strip("/")
@@ -251,9 +309,12 @@ async def upload_to_r2_and_prune(clip_path: Path):
     except Exception as e:
         logger.error(f"Error during R2 video upload: {e}")
         write_ram_log(f"Video Upload ERROR: {e}")
+        if clip_path.exists():
+            try: clip_path.unlink()
+            except Exception: pass
 
 async def archive_logs_to_r2():
-    """Archives accumulated logs to Cloudflare R2 & enforces 500MB limit on log folder"""
+    """Archives accumulated logs to Cloudflare R2"""
     try:
         s3 = get_s2_client()
         bucket = config.get("r2_bucket_name")
@@ -310,12 +371,18 @@ async def archive_logs_to_r2():
 
 async def periodic_log_archiver_loop():
     while True:
-        hours = config.get("log_auto_sync_hours", 6)
-        await asyncio.sleep(hours * 3600)
+        # Read interval in minutes (supports backwards compatibility)
+        minutes = config.get("log_auto_sync_minutes", config.get("log_auto_sync_hours", 6) * 60)
+        await asyncio.sleep(max(int(minutes), 1) * 60)
         await archive_logs_to_r2()
 
+# ==========================================
+# RESILIENT STREAM INGESTER (ACTIVE WATCHDOG)
+# ==========================================
 async def stream_ingest_loop():
     was_connected = False
+    boundary = b"--frame"
+
     while True:
         if hub_state.stream_paused:
             await asyncio.sleep(0.5)
@@ -323,85 +390,143 @@ async def stream_ingest_loop():
 
         stream_url = config.get("esp32_stream_url")
         try:
-            timeout = aiohttp.ClientTimeout(total=None, sock_connect=3, sock_read=8)
+            # 3.0s fast read timeout: if ESP32 Wi-Fi stalls, immediately trigger auto-reconnect!
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=3.0, sock_read=3.5)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(stream_url) as response:
-                    if response.status != 200:
-                        await asyncio.sleep(2)
-                        continue
+                async with session.get(stream_url, headers={"User-Agent": "RPi4-Hub"}) as response:
+                    response.raise_for_status()
+                    parsed = urlparse(stream_url)
+                    host = parsed.hostname or config.get("esp32_ip", "192.168.0.104")
+                    port = parsed.port or 8181
 
                     if not was_connected:
-                        logger.info(f"Stream connection established with ESP32: {stream_url}")
-                        write_ram_log(f"Stream connected: {stream_url}")
+                        logger.info(f"Stream connection established with ESP32 at {host}:{port}")
+                        write_ram_log(f"Stream connected to {host}:{port}")
                         was_connected = True
                         hub_state.esp_online = True
 
                     buffer = bytearray()
-                    async for chunk in response.content.iter_chunked(4096):
+                    async for chunk in response.content.iter_chunked(8192):
                         if hub_state.stream_paused:
                             break
 
                         buffer.extend(chunk)
 
+                        # Prevent runaway buffer growth
+                        if len(buffer) > 250000:
+                            b_last = buffer.rfind(boundary)
+                            if b_last != -1:
+                                buffer = buffer[b_last:]
+                            else:
+                                buffer = bytearray()
+                                continue
+
+                        # Parse multipart stream by Content-Length
                         while True:
-                            soi = buffer.find(b"\xff\xd8")
-                            eoi = buffer.find(b"\xff\xd9", soi + 2) if soi != -1 else -1
+                            b_idx = buffer.find(boundary)
+                            if b_idx == -1:
+                                if len(buffer) > 1000:
+                                    buffer = buffer[-len(boundary):]
+                                break
 
-                            if soi != -1 and eoi != -1:
-                                jpeg_bytes = bytes(buffer[soi : eoi + 2])
-                                header_part = buffer[:soi].decode("latin-1", errors="ignore")
-                                buffer = buffer[eoi + 2 :]
+                            header_end = buffer.find(b"\r\n\r\n", b_idx)
+                            if header_end == -1:
+                                if b_idx > 0:
+                                    buffer = buffer[b_idx:]
+                                break
 
-                                is_motion = "X-Motion: true" in header_part
-                                score = 0
-                                if "X-Motion-Score:" in header_part:
+                            header_text = buffer[b_idx:header_end].decode("latin-1", errors="ignore")
+                            
+                            # Extract Content-Length
+                            content_len = None
+                            for line in header_text.split("\r\n"):
+                                if line.lower().startswith("content-length:"):
                                     try:
-                                        score = int(header_part.split("X-Motion-Score:")[1].split("\r\n")[0].strip())
-                                    except Exception:
+                                        content_len = int(line.split(":", 1)[1].strip())
+                                    except ValueError:
                                         pass
+                                    break
 
-                                hub_state.latest_jpeg = jpeg_bytes
-                                hub_state.latest_motion = is_motion
-                                hub_state.latest_motion_score = score
-                                hub_state.last_frame_time = time.time()
-                                hub_state.pre_buffer.append(jpeg_bytes)
+                            if content_len is None:
+                                buffer = buffer[header_end + 4:]
+                                continue
+
+                            body_start = header_end + 4
+                            body_end = body_start + content_len
+
+                            if len(buffer) < body_end:
+                                if b_idx > 0:
+                                    buffer = buffer[b_idx:]
+                                break
+
+                            jpeg_bytes = bytes(buffer[body_start:body_end])
+                            buffer = buffer[body_end:]
+
+                            is_motion = "X-Motion: true" in header_text
+                            score = 0
+                            if "X-Motion-Score:" in header_text:
+                                try:
+                                    score = int(header_text.split("X-Motion-Score:")[1].split("\r\n")[0].strip())
+                                except Exception:
+                                    pass
+
+                            hub_state.latest_jpeg = jpeg_bytes
+                            hub_state.frame_id += 1
+                            hub_state.frame_event.set()
+                            hub_state.latest_motion = is_motion
+                            hub_state.latest_motion_score = score
+                            hub_state.last_frame_time = time.time()
+                            hub_state.pre_buffer.append(jpeg_bytes)
+
+                            # Safe Motion Recording
+                            try:
+                                now = time.time()
+                                max_clip_sec = config.get("max_clip_duration_sec", 300)
+                                post_sec = config.get("record_post_motion_sec", 8)
 
                                 if is_motion:
-                                    hub_state.last_motion_time = time.time()
+                                    hub_state.last_motion_time = now
                                     if not hub_state.is_recording:
                                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                         clip_file = ram_dir / f"motion_{timestamp}.avi"
                                         hub_state.current_writer = AviMjpegWriter(clip_file, width=800, height=600, fps=20)
                                         hub_state.current_clip_path = clip_file
+                                        hub_state.recording_start_time = now
                                         hub_state.is_recording = True
-                                        write_ram_log(f"Motion trigger active! Recording to RAM: {clip_file.name}")
+                                        write_ram_log(f"Motion trigger active! Recording: {clip_file.name}")
 
                                         for pre_frame in hub_state.pre_buffer:
                                             hub_state.current_writer.add_frame(pre_frame)
 
-                                if hub_state.is_recording:
+                                if hub_state.is_recording and hub_state.current_writer:
                                     hub_state.current_writer.add_frame(jpeg_bytes)
-                                    post_sec = config.get("record_post_motion_sec", 8)
-                                    if (time.time() - hub_state.last_motion_time) > post_sec:
+                                    
+                                    motion_inactive = (now - hub_state.last_motion_time) > post_sec
+                                    clip_duration_exceeded = (now - hub_state.recording_start_time) > max_clip_sec
+
+                                    if motion_inactive or clip_duration_exceeded:
                                         hub_state.current_writer.close()
                                         clip_to_upload = hub_state.current_clip_path
                                         hub_state.is_recording = False
                                         hub_state.current_writer = None
                                         hub_state.current_clip_path = None
-                                        asyncio.create_task(upload_to_r2_and_prune(clip_to_upload))
-                            else:
-                                break
+                                        if clip_to_upload and clip_to_upload.exists():
+                                            asyncio.create_task(upload_to_r2_and_prune(clip_to_upload))
+
+                            except Exception as rec_err:
+                                logger.warning(f"Safe recording error: {rec_err}")
+
+                    if not hub_state.stream_paused:
+                        raise ConnectionResetError("ESP32 stream closed by remote (EOF)")
 
         except Exception as e:
             if was_connected:
-                logger.info("ESP32 disconnected / power cut. Waiting for device to power back on...")
-                write_ram_log("ESP32 power disconnected. Entering standby reconnect loop...")
+                logger.info(f"ESP32 stream disconnected ({type(e).__name__}: {e}). Auto-reconnecting in 1s...")
+                write_ram_log(f"ESP32 stream disconnected: {e}")
                 was_connected = False
                 hub_state.esp_online = False
-                hub_state.latest_jpeg = None
 
             if hub_state.is_recording and hub_state.current_writer:
-                write_ram_log("Stream dropped mid-recording. Finalizing partial clip...")
                 hub_state.current_writer.close()
                 clip_to_upload = hub_state.current_clip_path
                 hub_state.is_recording = False
@@ -410,7 +535,7 @@ async def stream_ingest_loop():
                 if clip_to_upload and clip_to_upload.exists():
                     asyncio.create_task(upload_to_r2_and_prune(clip_to_upload))
 
-            await asyncio.sleep(2)
+        await asyncio.sleep(1.0)
 
 async def telemetry_and_log_poll_loop():
     while True:
@@ -475,18 +600,136 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 async def serve_index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+@app.get("/snapshot")
+@app.get("/api/snapshot")
+async def get_snapshot(after: Optional[int] = None, wait_ms: int = 0):
+    """Returns a fresh JPEG, optionally waiting for a frame newer than ``after``."""
+    # Fast Stream uses long polling.  Keep the timeout bounded so a disconnected
+    # browser does not hold a request indefinitely.
+    wait_seconds = min(max(wait_ms, 0), 1500) / 1000.0
+    if after is not None and wait_seconds:
+        deadline = time.monotonic() + wait_seconds
+        # Frame IDs restart at zero when the Hub process restarts.  A value that
+        # differs from ``after`` (including a lower value after restart) is new.
+        while hub_state.latest_jpeg is None or hub_state.frame_id == after:
+            hub_state.frame_event.clear()
+            # Check once more after clearing the event to avoid missing a frame
+            # that arrived immediately before this request began waiting.
+            if hub_state.latest_jpeg is not None and hub_state.frame_id != after:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(hub_state.frame_event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+
+    now = time.time()
+    # If camera hasn't sent a frame in 4 seconds, mark as unavailable
+    is_fresh = (now - hub_state.last_frame_time) < 4.0
+    
+    if hub_state.latest_jpeg and is_fresh and (after is None or hub_state.frame_id != after):
+        return Response(
+            content=hub_state.latest_jpeg,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Frame-ID": str(hub_state.frame_id),
+                "X-Frame-Age": f"{(now - hub_state.last_frame_time):.2f}"
+            }
+        )
+
+    if after is not None and hub_state.latest_jpeg:
+        # A healthy camera simply has not emitted a newer frame during the long
+        # poll window.  Avoid re-sending the same JPEG.
+        return Response(
+            status_code=204,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "X-Frame-ID": str(hub_state.frame_id)
+            }
+        )
+    return PlainTextResponse("Camera reconnecting...", status_code=503)
+
+@app.get("/api/debug")
+async def get_debug_info():
+    """Diagnostic tool to inspect raw camera buffers and streaming state"""
+    now = time.time()
+    has_jpeg = hub_state.latest_jpeg is not None
+    jpeg_len = len(hub_state.latest_jpeg) if has_jpeg else 0
+    soi_valid = False
+    eoi_valid = False
+    first_16 = ""
+    last_16 = ""
+    if has_jpeg and jpeg_len > 4:
+        soi_valid = hub_state.latest_jpeg.startswith(b"\xff\xd8")
+        eoi_valid = hub_state.latest_jpeg.endswith(b"\xff\xd9")
+        first_16 = hub_state.latest_jpeg[:16].hex()
+        last_16 = hub_state.latest_jpeg[-16:].hex()
+
+    return {
+        "esp_online": hub_state.esp_online,
+        "stream_paused": hub_state.stream_paused,
+        "frame_id": hub_state.frame_id,
+        "frame_age_seconds": round(now - hub_state.last_frame_time, 2),
+        "has_jpeg": has_jpeg,
+        "jpeg_len_bytes": jpeg_len,
+        "soi_valid": soi_valid,
+        "eoi_valid": eoi_valid,
+        "first_16_bytes_hex": first_16,
+        "last_16_bytes_hex": last_16,
+        "fps": hub_state.esp32_telemetry.get("fps", 0),
+        "motion_detected": hub_state.latest_motion,
+        "motion_score": hub_state.latest_motion_score,
+        "is_recording": hub_state.is_recording,
+        "last_reset_reason": hub_state.last_reset_reason,
+        "time": datetime.now().isoformat()
+    }
+
 @app.get("/video_feed")
 async def video_feed():
     async def frame_generator():
+        last_sent_id = -1
+        yield b"--frame\r\n"
         while True:
-            if not hub_state.stream_paused and hub_state.latest_jpeg:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + hub_state.latest_jpeg + b"\r\n"
-                )
-            await asyncio.sleep(0.04)
+            if hub_state.stream_paused:
+                await asyncio.sleep(0.1)
+                continue
 
-    return StreamingResponse(frame_generator(), media_type="multipart/x-mixed-replace; boundary=frame")
+            if hub_state.latest_jpeg and hub_state.frame_id != last_sent_id:
+                last_sent_id = hub_state.frame_id
+                frame_data = hub_state.latest_jpeg
+                yield (
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(frame_data)).encode() + b"\r\n\r\n"
+                    + frame_data
+                    + b"\r\n--frame\r\n"
+                )
+
+            # Wait for the next source frame instead of polling 50 times/sec per
+            # Native MJPEG viewer.  A timeout keeps the connection responsive
+            # while the camera reconnects.
+            try:
+                while hub_state.latest_jpeg is None or hub_state.frame_id <= last_sent_id:
+                    hub_state.frame_event.clear()
+                    if hub_state.latest_jpeg is not None and hub_state.frame_id > last_sent_id:
+                        break
+                    await asyncio.wait_for(hub_state.frame_event.wait(), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+
+    return StreamingResponse(
+        frame_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 @app.post("/api/stream/toggle")
 async def toggle_stream():
@@ -503,6 +746,7 @@ async def get_status():
     tel["is_recording"] = hub_state.is_recording
     tel["stream_paused"] = hub_state.stream_paused
     tel["esp_online"] = hub_state.esp_online
+    tel["frame_id"] = hub_state.frame_id
     tel["motion_detected"] = hub_state.latest_motion or tel.get("motion_detected", False)
     tel["motion_score"] = hub_state.latest_motion_score or tel.get("motion_score", 0)
     
@@ -684,6 +928,32 @@ async def list_recordings():
         }
     except Exception as e:
         return {"recordings": [], "total_bytes": 0, "max_storage_gb": 8.0, "error": str(e)}
+
+@app.delete("/api/recordings")
+async def delete_all_recordings():
+    s3 = get_s2_client()
+    bucket = config.get("r2_bucket_name")
+    prefix = config.get("r2_video_prefix", "recordings/").strip("/")
+    prefix_str = f"{prefix}/" if prefix else ""
+
+    if not s3 or not bucket:
+        raise HTTPException(status_code=400, detail="R2 not configured")
+
+    try:
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix_str)
+        objects = response.get("Contents", [])
+        delete_keys = [{'Key': obj['Key']} for obj in objects if obj['Key'] != prefix_str]
+        
+        if delete_keys:
+            # S3 / R2 supports up to 1000 keys per delete_objects call
+            for i in range(0, len(delete_keys), 1000):
+                batch = delete_keys[i:i + 1000]
+                s3.delete_objects(Bucket=bucket, Delete={'Objects': batch})
+            write_ram_log(f"Deleted all {len(delete_keys)} video recordings from Cloudflare R2.")
+
+        return {"status": "success", "deleted_count": len(delete_keys)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/recordings/{key:path}")
 async def delete_recording(key: str):
