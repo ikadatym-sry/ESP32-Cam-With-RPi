@@ -289,7 +289,7 @@
   <header>
     <div class="logo-area">
       <i class="fa-solid fa-video"></i>
-      <h1>ESP32-CAM Hub & Cloudflare R2</h1>
+      <h1>Stupid Webserver</h1>
     </div>
     <div class="status-badge">
       <div class="status-dot" id="esp-status-dot"></div>
@@ -313,18 +313,9 @@
         <div class="card">
           <div class="card-title" style="justify-content: space-between;">
             <div><i class="fa-solid fa-broadcast-tower"></i> Live Camera Stream (Port 8181)</div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <select id="stream-engine-select" onchange="changeStreamEngine(this.value)" style="background: #111422; color: #fff; border: 1px solid var(--border); padding: 4px 8px; border-radius: 6px; font-size: 12px;">
-                <option value="fast_blob">New</option>
-                <option value="mjpeg">Original</option>
-              </select>
-              <button class="btn btn-sm" onclick="forceReloadStream()" title="Reload Stream Socket">
-                <i class="fa-solid fa-rotate"></i>
-              </button>
-              <button class="btn btn-sm" id="btn-pause-stream" onclick="toggleStreamPause()">
-                <i class="fa-solid fa-pause" id="icon-stream-pause"></i> <span id="text-stream-pause">Pause</span>
-              </button>
-            </div>
+            <button class="btn btn-sm" id="btn-pause-stream" onclick="toggleStreamPause()">
+              <i class="fa-solid fa-pause" id="icon-stream-pause"></i> <span id="text-stream-pause">Pause Stream</span>
+            </button>
           </div>
 
           <div class="video-container">
@@ -650,12 +641,6 @@
     let currentFlashState = false;
     let currentFlashBrightness = 0;
     let isStreamPaused = false;
-    let streamEngine = 'fast_blob';
-    let blobLoopActive = false;
-    let currentObjectUrl = null;
-    let isFetching = false;
-    let lastRenderedFrameId = -1;
-    let activeFetchController = null;
 
     function switchTab(tabId) {
       document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -667,112 +652,6 @@
       if (tabId === 'recordings') fetchRecordings();
       if (tabId === 'r2logs') fetchR2Logs();
       if (tabId === 'serial') fetchLogs();
-      if (tabId === 'status') fetchDebugInfo();
-    }
-
-    // --- Resilient Auto-Healing Universal Stream Engine ---
-    function stopFastBlobLoop() {
-      blobLoopActive = false;
-      if (activeFetchController) {
-        activeFetchController.abort();
-        activeFetchController = null;
-      }
-      if (currentObjectUrl) {
-        URL.revokeObjectURL(currentObjectUrl);
-        currentObjectUrl = null;
-      }
-    }
-
-    function startFastBlobLoop() {
-      if (blobLoopActive) return;
-      blobLoopActive = true;
-
-      const img = document.getElementById('live-stream-img');
-
-      async function pumpFrame() {
-        if (!blobLoopActive || streamEngine !== 'fast_blob' || isStreamPaused) {
-          blobLoopActive = false;
-          if (currentObjectUrl) {
-            URL.revokeObjectURL(currentObjectUrl);
-            currentObjectUrl = null;
-          }
-          return;
-        }
-
-        if (isFetching) {
-          setTimeout(pumpFrame, 20);
-          return;
-        }
-
-        isFetching = true;
-        const controller = new AbortController();
-        activeFetchController = controller;
-        // The Hub long-polls for up to 1.2s for a new source frame.  Leave
-        // transport headroom so normal long-poll responses are not aborted.
-        const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-        try {
-          const res = await fetch('/snapshot?after=' + encodeURIComponent(lastRenderedFrameId) + '&wait_ms=1200', {
-            cache: 'no-store',
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-
-          if (res.status === 204) {
-            // No source frame was produced during the long-poll interval.
-          } else if (res.ok) {
-            const frameId = Number(res.headers.get('X-Frame-ID'));
-            const blob = await res.blob();
-            if (Number.isFinite(frameId) && frameId !== lastRenderedFrameId && blob.size > 500 &&
-                blobLoopActive && streamEngine === 'fast_blob' && !isStreamPaused) {
-              const oldUrl = currentObjectUrl;
-              const newUrl = URL.createObjectURL(blob);
-              currentObjectUrl = newUrl;
-              img.src = newUrl;
-              lastRenderedFrameId = frameId;
-
-              if (oldUrl) {
-                setTimeout(() => URL.revokeObjectURL(oldUrl), 80);
-              }
-            }
-          }
-        } catch (e) {
-          // Timeout or network glitch: auto-recover instantly on next tick
-        } finally {
-          clearTimeout(timeoutId);
-          if (activeFetchController === controller) activeFetchController = null;
-          isFetching = false;
-        }
-
-        if (blobLoopActive && streamEngine === 'fast_blob') {
-          setTimeout(pumpFrame, 0);
-        }
-      }
-
-      pumpFrame();
-    }
-
-    function changeStreamEngine(engine) {
-      streamEngine = engine;
-      const img = document.getElementById('live-stream-img');
-
-      if (engine === 'mjpeg') {
-        stopFastBlobLoop();
-        img.src = '/video_feed?t=' + Date.now();
-      } else {
-        img.src = '';
-        startFastBlobLoop();
-      }
-    }
-
-    function forceReloadStream() {
-      if (streamEngine === 'fast_blob') {
-        stopFastBlobLoop();
-        setTimeout(startFastBlobLoop, 50);
-      } else {
-        const img = document.getElementById('live-stream-img');
-        img.src = '/video_feed?t=' + Date.now();
-      }
     }
 
     // --- Stream Pause / Resume Toggle ---
@@ -798,8 +677,7 @@
         overlay.style.display = 'flex';
         btn.classList.add('btn-success');
         icon.className = 'fa-solid fa-play';
-        text.innerText = 'Resume';
-        stopFastBlobLoop();
+        text.innerText = 'Resume Stream';
         img.src = '';
       } else {
         overlay.style.display = 'none';
@@ -1228,9 +1106,6 @@
     updateTelemetry();
     fetchRecordings();
     fetchR2Logs();
-    
-    // Start auto-healing stream pump
-    startFastBlobLoop();
   </script>
 </body>
 </html>
