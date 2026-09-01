@@ -289,7 +289,7 @@
   <header>
     <div class="logo-area">
       <i class="fa-solid fa-video"></i>
-      <h1>Stupid Web</h1>
+      <h1>Stupid Webserver</h1>
     </div>
     <div class="status-badge">
       <div class="status-dot" id="esp-status-dot"></div>
@@ -313,13 +313,22 @@
         <div class="card">
           <div class="card-title" style="justify-content: space-between;">
             <div><i class="fa-solid fa-broadcast-tower"></i> Live Camera Stream (Port 8181)</div>
-            <button class="btn btn-sm" id="btn-pause-stream" onclick="toggleStreamPause()">
-              <i class="fa-solid fa-pause" id="icon-stream-pause"></i> <span id="text-stream-pause">Pause Stream</span>
-            </button>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <select id="stream-engine-select" onchange="changeStreamEngine(this.value)" style="background: #111422; color: #fff; border: 1px solid var(--border); padding: 4px 8px; border-radius: 6px; font-size: 12px;">
+                <option value="fast_blob">Engine: Fast Universal (iPad/Chrome)</option>
+                <option value="mjpeg">Engine: Native MJPEG</option>
+              </select>
+              <button class="btn btn-sm" onclick="forceReloadStream()" title="Reload Stream Socket">
+                <i class="fa-solid fa-rotate"></i>
+              </button>
+              <button class="btn btn-sm" id="btn-pause-stream" onclick="toggleStreamPause()">
+                <i class="fa-solid fa-pause" id="icon-stream-pause"></i> <span id="text-stream-pause">Pause</span>
+              </button>
+            </div>
           </div>
 
           <div class="video-container">
-            <img id="live-stream-img" src="/video_feed" alt="Live Feed">
+            <img id="live-stream-img" src="/snapshot" alt="Live Feed">
             
             <div id="stream-paused-overlay" class="stream-paused-overlay">
               <i class="fa-solid fa-circle-pause"></i>
@@ -360,7 +369,7 @@
           <div class="metric-card">
             <div class="metric-header"><span>Active FPS</span><i class="fa-solid fa-gauge-high"></i></div>
             <div class="metric-value" id="quick-fps">-- FPS</div>
-            <div class="metric-sub">Streamed via RPi 4 relay</div>
+            <div class="metric-sub" id="quick-frame-info">Frame ID: 0 | Size: -- KB</div>
           </div>
 
           <div class="metric-card">
@@ -419,6 +428,28 @@
           <div class="metric-value" id="stat-wifi-rssi">-- dBm</div>
           <div class="metric-sub" id="stat-wifi-quality">Signal Quality: --</div>
           <div class="progress-bar-bg"><div class="progress-bar-fill" id="wifi-bar" style="width: 0%;"></div></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom: 24px;">
+        <div class="card-title"><i class="fa-solid fa-bug"></i> Real-time Video Stream Diagnostics</div>
+        <div class="grid-4">
+          <div style="background: #111422; padding: 12px; border-radius: 8px;">
+            <div style="font-size: 12px; color: var(--text-muted);">Frame Buffer Health</div>
+            <div style="font-size: 16px; font-weight: 600; color: var(--success);" id="dbg-soi">JPEG Valid (SOI/EOI OK)</div>
+          </div>
+          <div style="background: #111422; padding: 12px; border-radius: 8px;">
+            <div style="font-size: 12px; color: var(--text-muted);">Current JPEG Size</div>
+            <div style="font-size: 16px; font-weight: 600; color: #fff;" id="dbg-size">0 KB</div>
+          </div>
+          <div style="background: #111422; padding: 12px; border-radius: 8px;">
+            <div style="font-size: 12px; color: var(--text-muted);">Total Ingested Frames</div>
+            <div style="font-size: 16px; font-weight: 600; color: #38bdf8;" id="dbg-frames">0</div>
+          </div>
+          <div style="background: #111422; padding: 12px; border-radius: 8px;">
+            <div style="font-size: 12px; color: var(--text-muted);">Direct Snapshot Link</div>
+            <div style="font-size: 14px;"><a href="/snapshot" target="_blank" style="color: var(--primary);">Open /snapshot ↗</a></div>
+          </div>
         </div>
       </div>
 
@@ -616,6 +647,9 @@
     let currentFlashState = false;
     let currentFlashBrightness = 0;
     let isStreamPaused = false;
+    let streamEngine = 'fast_blob'; // 'fast_blob' (100% universal) or 'mjpeg'
+    let blobLoopRunning = false;
+    let activeBlobUrl = null;
 
     function switchTab(tabId) {
       document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -627,6 +661,68 @@
       if (tabId === 'recordings') fetchRecordings();
       if (tabId === 'r2logs') fetchR2Logs();
       if (tabId === 'serial') fetchLogs();
+      if (tabId === 'status') fetchDebugInfo();
+    }
+
+    // --- Fast Universal Stream Engine (Zero-Blackscreen) ---
+    function startFastBlobLoop() {
+      if (blobLoopRunning) return;
+      blobLoopRunning = true;
+
+      const img = document.getElementById('live-stream-img');
+
+      async function nextFrame() {
+        if (!blobLoopRunning || streamEngine !== 'fast_blob' || isStreamPaused) {
+          blobLoopRunning = false;
+          return;
+        }
+
+        try {
+          const res = await fetch('/snapshot?t=' + Date.now());
+          if (res.ok) {
+            const blob = await res.blob();
+            if (blob.size > 500) {
+              const newUrl = URL.createObjectURL(blob);
+              img.onload = () => {
+                if (activeBlobUrl) URL.revokeObjectURL(activeBlobUrl);
+                activeBlobUrl = newUrl;
+              };
+              img.src = newUrl;
+            }
+          }
+        } catch (e) {}
+
+        // Schedule next frame with requestAnimationFrame for ultra-smooth 25 FPS
+        if (blobLoopRunning && streamEngine === 'fast_blob') {
+          setTimeout(nextFrame, 40);
+        }
+      }
+
+      nextFrame();
+    }
+
+    function changeStreamEngine(engine) {
+      streamEngine = engine;
+      const img = document.getElementById('live-stream-img');
+
+      if (engine === 'mjpeg') {
+        blobLoopRunning = false;
+        if (activeBlobUrl) { URL.revokeObjectURL(activeBlobUrl); activeBlobUrl = null; }
+        img.src = '/video_feed?t=' + Date.now();
+      } else {
+        img.src = '';
+        startFastBlobLoop();
+      }
+    }
+
+    function forceReloadStream() {
+      if (streamEngine === 'fast_blob') {
+        blobLoopRunning = false;
+        setTimeout(startFastBlobLoop, 100);
+      } else {
+        const img = document.getElementById('live-stream-img');
+        img.src = '/video_feed?t=' + Date.now();
+      }
     }
 
     // --- Stream Pause / Resume Toggle ---
@@ -652,20 +748,22 @@
         overlay.style.display = 'flex';
         btn.classList.add('btn-success');
         icon.className = 'fa-solid fa-play';
-        text.innerText = 'Resume Stream';
+        text.innerText = 'Resume';
         img.src = '';
       } else {
         overlay.style.display = 'none';
         btn.classList.remove('btn-success');
         icon.className = 'fa-solid fa-pause';
-        text.innerText = 'Pause Stream';
-        if (!img.src.includes('/video_feed')) {
-          img.src = '/video_feed?' + new Date().getTime();
+        text.innerText = 'Pause';
+        if (streamEngine === 'fast_blob') {
+          startFastBlobLoop();
+        } else {
+          forceReloadStream();
         }
       }
     }
 
-    // --- Telemetry Polling ---
+    // --- Telemetry & Diagnostics Polling ---
     async function updateTelemetry() {
       try {
         const res = await fetch('/api/status');
@@ -674,12 +772,6 @@
 
         document.getElementById('esp-status-dot').classList.add('online');
         document.getElementById('esp-status-text').innerText = 'ESP32 Connected (' + data.esp32_ip + ')';
-
-        // Stream Paused status sync
-        if (data.stream_paused !== undefined && isStreamPaused !== data.stream_paused) {
-          isStreamPaused = data.stream_paused;
-          updateStreamUI();
-        }
 
         // Die Temp
         const temp = data.temperature_c;
@@ -732,6 +824,8 @@
 
         // Quick cards & Motion
         document.getElementById('quick-fps').innerText = isStreamPaused ? 'PAUSED' : (data.fps.toFixed(1) + ' FPS');
+        document.getElementById('quick-frame-info').innerText = `Frame ID: ${data.frame_id || 0}`;
+
         const motionBanner = document.getElementById('motion-banner');
         const quickMotionState = document.getElementById('quick-motion-state');
         if (data.motion_detected && !isStreamPaused) {
@@ -759,6 +853,17 @@
         document.getElementById('esp-status-dot').classList.remove('online');
         document.getElementById('esp-status-text').innerText = 'ESP32 Disconnected';
       }
+    }
+
+    async function fetchDebugInfo() {
+      try {
+        const res = await fetch('/api/debug');
+        const d = await res.json();
+        document.getElementById('dbg-soi').innerText = (d.soi_valid && d.eoi_valid) ? 'JPEG Valid (SOI/EOI OK)' : 'Checking stream...';
+        document.getElementById('dbg-soi').style.color = (d.soi_valid && d.eoi_valid) ? 'var(--success)' : 'var(--warning)';
+        document.getElementById('dbg-size').innerText = (d.jpeg_len_bytes / 1024).toFixed(1) + ' KB';
+        document.getElementById('dbg-frames').innerText = d.frame_id;
+      } catch (e) {}
     }
 
     // --- Flashlight PWM UI & Controls ---
@@ -1060,6 +1165,9 @@
     updateTelemetry();
     fetchRecordings();
     fetchR2Logs();
+    
+    // Start fast universal blob streaming engine
+    startFastBlobLoop();
   </script>
 </body>
 </html>
