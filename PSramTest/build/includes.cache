@@ -1,0 +1,63 @@
+[
+  {
+    "added_include_path": "C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.11\\cores\\esp32"
+  },
+  {
+    "added_include_path": "C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.11\\variants\\esp32"
+  },
+  {
+    "compile": {
+      "source_path": "G:\\MyHobby\\ESP32-CamV2\\PSramTest\\build\\sketch\\PSramTest.ino.cpp.merged",
+      "depfile_path": "G:\\MyHobby\\ESP32-CamV2\\PSramTest\\build\\sketch\\PSramTest.ino.cpp.merged.libsdetect.d"
+    },
+    "compile_task": {
+      "args": [
+        "C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp-x32\\2601/bin/xtensa-esp32-elf-g++",
+        "-c",
+        "@C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp32-libs\\3.3.11/flags/cpp_flags",
+        "-w",
+        "-Os",
+        "-Werror=return-type",
+        "-w",
+        "-x",
+        "c++",
+        "-E",
+        "-CC",
+        "-DF_CPU=240000000L",
+        "-DARDUINO=10607",
+        "-DARDUINO_ESP32_DEV",
+        "-DARDUINO_ARCH_ESP32",
+        "-DARDUINO_BOARD=\"ESP32_DEV\"",
+        "-DARDUINO_VARIANT=\"esp32\"",
+        "-DARDUINO_PARTITION_huge_app",
+        "-DARDUINO_HOST_OS=\"windows\"",
+        "-DARDUINO_FQBN=\"esp32:esp32:esp32cam:CPUFreq=240,FlashFreq=80,FlashMode=qio,PartitionScheme=huge_app,DebugLevel=none,EraseFlash=none\"",
+        "-DESP32=ESP32",
+        "-DCORE_DEBUG_LEVEL=0",
+        "-DBOARD_HAS_PSRAM",
+        "-mfix-esp32-psram-cache-issue",
+        "-mfix-esp32-psram-cache-strategy=memw",
+        "-DARDUINO_USB_CDC_ON_BOOT=0",
+        "@C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp32-libs\\3.3.11/flags/defines",
+        "-IG:\\MyHobby\\ESP32-CamV2\\PSramTest",
+        "-iprefix",
+        "C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp32-libs\\3.3.11/include/",
+        "@C:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp32-libs\\3.3.11/flags/includes",
+        "-IC:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\tools\\esp32-libs\\3.3.11/qio_qspi/include",
+        "-IC:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.11\\cores\\esp32",
+        "-IC:\\Users\\eakzz\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.11\\variants\\esp32",
+        "@G:\\MyHobby\\ESP32-CamV2\\PSramTest\\build/build_opt.h",
+        "@G:\\MyHobby\\ESP32-CamV2\\PSramTest\\build/file_opts",
+        "G:\\MyHobby\\ESP32-CamV2\\PSramTest\\build\\sketch\\PSramTest.ino.cpp.merged",
+        "-o",
+        "nul",
+        "-MMD",
+        "-MF",
+        "G:\\MyHobby\\ESP32-CamV2\\PSramTest\\build\\sketch\\PSramTest.ino.cpp.merged.libsdetect.d"
+      ]
+    }
+  },
+  {
+    "missing_include_h": ""
+  }
+]

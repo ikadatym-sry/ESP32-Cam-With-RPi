@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32-CAM Hub & Cloudflare R2</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    :root {
+      --bg-main: #0f111a;
+      --bg-card: #1a1d2e;
+      --bg-card-hover: #22263d;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --border: #2e344e;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg-main); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+
+    header {
+      background-color: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo-area { display: flex; align-items: center; gap: 12px; }
+    .logo-area i { font-size: 24px; color: var(--primary); }
+    .logo-area h1 { font-size: 20px; font-weight: 600; }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #111422;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      border: 1px solid var(--border);
+    }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; background-color: var(--danger); }
+    .status-dot.online { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
+
+    .nav-tabs {
+      display: flex;
+      background: var(--bg-card);
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      gap: 8px;
+      overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 14px 20px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 3px solid transparent;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+    main { padding: 24px; max-width: 1300px; width: 100%; margin: 0 auto; flex: 1; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; animation: fadeIn 0.3s ease; }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Cards & Grid */
+    .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; color: var(--text); }
+
+    /* Video Player */
+    .video-container {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      aspect-ratio: 4/3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .video-container img { width: 100%; height: 100%; object-fit: contain; }
+    .motion-banner {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      background: rgba(239, 68, 68, 0.9);
+      color: white;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    .stream-paused-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 17, 26, 0.88);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: var(--text-muted);
+      z-index: 5;
+    }
+    .stream-paused-overlay i { font-size: 48px; color: var(--warning); }
+
+    .video-controls-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+      padding: 10px 14px;
+      background: #111422;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      flex-wrap: wrap;
+    }
+
+    /* Metrics */
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .metric-header { display: flex; justify-content: space-between; align-items: center; color: var(--text-muted); font-size: 14px; }
+    .metric-value { font-size: 28px; font-weight: 700; color: var(--text); }
+    .metric-sub { font-size: 12px; color: var(--text-muted); }
+    .progress-bar-bg { width: 100%; height: 8px; background: #2a2e45; border-radius: 4px; overflow: hidden; margin-top: 6px; }
+    .progress-bar-fill { height: 100%; background: var(--primary); border-radius: 4px; transition: width 0.4s; }
+
+    /* Buttons */
+    .btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn-warning { background: var(--warning); color: #000; }
+    .btn-warning:hover { background: #d97706; }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #dc2626; }
+    .btn-success { background: var(--success); }
+    .btn-success:hover { background: #059669; }
+    .btn-sm { padding: 6px 10px; font-size: 12px; }
+
+    .storage-box {
+      background: linear-gradient(135deg, #1e1b4b 0%, #1a1d2e 100%);
+      border: 1px solid #3730a3;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+
+    /* Terminal Console */
+    .terminal-container {
+      background: #090a10;
+      border: 1px solid #23273a;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 13px;
+      color: #a7f3d0;
+      height: 380px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .log-line { line-height: 1.4; word-break: break-all; }
+    .log-sys { color: #38bdf8; }
+    .log-motion { color: #fbbf24; }
+    .log-err { color: #f87171; font-weight: bold; }
+    .log-pwr { color: #c084fc; }
+
+    .terminal-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* Table */
+    .table-container { overflow-x: auto; margin-top: 16px; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th { padding: 12px 16px; background: #131624; color: var(--text-muted); font-size: 13px; text-transform: uppercase; }
+    td { padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    tr:hover td { background: var(--bg-card-hover); }
+
+    /* Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      z-index: 999;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .modal-content {
+      background: var(--bg-card);
+      border-radius: 12px;
+      max-width: 800px;
+      width: 100%;
+      padding: 20px;
+      position: relative;
+    }
+    .modal-close {
+      position: absolute;
+      top: 15px;
+      right: 15px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 20px;
+      cursor: pointer;
+    }
+
+    /* OTA Form */
+    .ota-box {
+      max-width: 500px;
+      margin: 30px auto;
+      text-align: center;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+    }
+    .file-dropzone {
+      border: 2px dashed var(--border);
+      padding: 30px;
+      border-radius: 8px;
+      margin: 20px 0;
+      cursor: pointer;
+      background: #131624;
+    }
+    .file-dropzone:hover { border-color: var(--primary); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo-area">
+      <i class="fa-solid fa-video"></i>
+      <h1>Stupid Web</h1>
+    </div>
+    <div class="status-badge">
+      <div class="status-dot" id="esp-status-dot"></div>
+      <span id="esp-status-text">Connecting to ESP32...</span>
+    </div>
+  </header>
+
+  <nav class="nav-tabs">
+    <button class="tab-btn active" onclick="switchTab('live')"><i class="fa-solid fa-play"></i> Live View</button>
+    <button class="tab-btn" onclick="switchTab('status')"><i class="fa-solid fa-microchip"></i> ESP32 Status</button>
+    <button class="tab-btn" onclick="switchTab('serial')"><i class="fa-solid fa-terminal"></i> Serial & Controls</button>
+    <button class="tab-btn" onclick="switchTab('recordings')"><i class="fa-solid fa-film"></i> R2 Videos (8GB)</button>
+    <button class="tab-btn" onclick="switchTab('r2logs')"><i class="fa-solid fa-box-archive"></i> R2 Logs (500MB)</button>
+    <button class="tab-btn" onclick="switchTab('ota')"><i class="fa-solid fa-upload"></i> OTA Update</button>
+  </nav>
+
+  <main>
+    <!-- TAB 1: LIVE VIEW -->
+    <div id="tab-live" class="tab-content active">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title" style="justify-content: space-between;">
+            <div><i class="fa-solid fa-broadcast-tower"></i> Live Camera Stream (Port 8181)</div>
+            <button class="btn btn-sm" id="btn-pause-stream" onclick="toggleStreamPause()">
+              <i class="fa-solid fa-pause" id="icon-stream-pause"></i> <span id="text-stream-pause">Pause Stream</span>
+            </button>
+          </div>
+
+          <div class="video-container">
+            <img id="live-stream-img" src="/video_feed" alt="Live Feed">
+            
+            <div id="stream-paused-overlay" class="stream-paused-overlay">
+              <i class="fa-solid fa-circle-pause"></i>
+              <p style="font-size: 16px; font-weight: 600; color: #fff;">Stream is Paused (Standby)</p>
+              <p style="font-size: 13px;">ESP32 Wi-Fi upload paused (0 Mbps) to save power & bandwidth.</p>
+              <button class="btn btn-success" style="margin-top: 8px;" onclick="toggleStreamPause()">
+                <i class="fa-solid fa-play"></i> Resume Stream
+              </button>
+            </div>
+
+            <div id="motion-banner" class="motion-banner">
+              <i class="fa-solid fa-person-running"></i> MOTION DETECTED
+            </div>
+          </div>
+
+          <!-- Flashlight Controls Bar -->
+          <div class="video-controls-bar">
+            <button class="btn btn-sm" id="btn-flash-toggle" onclick="toggleFlashQuick()">
+              <i class="fa-solid fa-lightbulb" id="icon-flash"></i> <span id="text-flash">Flash: OFF</span>
+            </button>
+            <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
+              <span style="font-size: 12px; color: var(--text-muted);"><i class="fa-solid fa-sun"></i> Brightness:</span>
+              <input type="range" id="flash-slider" min="0" max="255" value="0" style="flex: 1; cursor: pointer;" onchange="setFlashBrightness(this.value)">
+              <span id="flash-pct" style="font-size: 12px; min-width: 38px; color: var(--text-muted);">0%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="display: flex; flex-direction: column; gap: 16px;">
+          <div class="card-title"><i class="fa-solid fa-info-circle"></i> Quick Overview</div>
+          
+          <div class="metric-card">
+            <div class="metric-header"><span>Motion State</span><i class="fa-solid fa-shield-halved"></i></div>
+            <div class="metric-value" id="quick-motion-state" style="font-size: 20px; color: var(--success);">IDLE</div>
+            <div class="metric-sub" id="quick-motion-score">Motion score: 0</div>
+          </div>
+
+          <div class="metric-card">
+            <div class="metric-header"><span>Active FPS</span><i class="fa-solid fa-gauge-high"></i></div>
+            <div class="metric-value" id="quick-fps">-- FPS</div>
+            <div class="metric-sub">Streamed via RPi 4 relay</div>
+          </div>
+
+          <div class="metric-card">
+            <div class="metric-header"><span>Videos in R2</span><i class="fa-solid fa-film"></i></div>
+            <div class="metric-value" id="quick-r2-usage">-- / 8.00 GB</div>
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="quick-r2-bar" style="width: 0%;"></div></div>
+          </div>
+
+          <div class="metric-card">
+            <div class="metric-header"><span>Logs in R2</span><i class="fa-solid fa-box-archive"></i></div>
+            <div class="metric-value" id="quick-log-usage">-- / 500.0 MB</div>
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="quick-log-bar" style="width: 0%; background: #06b6d4;"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: ESP32 STATUS -->
+    <div id="tab-status" class="tab-content">
+      <div class="grid-4" style="margin-bottom: 24px;">
+        <div class="metric-card">
+          <div class="metric-header">
+            <span>Die Temperature</span>
+            <i class="fa-solid fa-temperature-half" id="temp-icon" style="color: var(--success);"></i>
+          </div>
+          <div class="metric-value" id="stat-temp">-- °C</div>
+          <div class="metric-sub">Internal ESP32 chip die sensor</div>
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="temp-bar" style="width: 50%; background: var(--success);"></div></div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span>Free PSRAM</span>
+            <i class="fa-solid fa-memory" style="color: var(--primary);"></i>
+          </div>
+          <div class="metric-value" id="stat-psram-free">-- MB</div>
+          <div class="metric-sub" id="stat-psram-total">Total: 2.00 MB | Min: -- MB</div>
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="psram-bar" style="width: 0%;"></div></div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span>Free Internal Heap</span>
+            <i class="fa-solid fa-microchip" style="color: #06b6d4;"></i>
+          </div>
+          <div class="metric-value" id="stat-heap-free">-- KB</div>
+          <div class="metric-sub" id="stat-heap-min">Lowest Min: -- KB</div>
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="heap-bar" style="width: 0%; background: #06b6d4;"></div></div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span>Wi-Fi Signal (RSSI)</span>
+            <i class="fa-solid fa-wifi" id="wifi-icon" style="color: var(--success);"></i>
+          </div>
+          <div class="metric-value" id="stat-wifi-rssi">-- dBm</div>
+          <div class="metric-sub" id="stat-wifi-quality">Signal Quality: --</div>
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="wifi-bar" style="width: 0%;"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><i class="fa-solid fa-list-check"></i> System & Hardware Diagnostics</div>
+        <table style="width: 100%;">
+          <tr><td><strong>Last Boot Reason:</strong></td><td id="stat-reset-reason" style="color: #38bdf8; font-weight: 600;">--</td></tr>
+          <tr><td><strong>ESP32 Clock Time:</strong></td><td id="stat-clock-time">--</td></tr>
+          <tr><td><strong>ESP32 Uptime:</strong></td><td id="stat-uptime">--</td></tr>
+          <tr><td><strong>Port Architecture:</strong></td><td>Port 8100 (Commands/Logs) | Port 8181 (Dedicated Stream)</td></tr>
+          <tr><td><strong>Camera Resolution:</strong></td><td>SVGA (800x600) @ High Quality JPEG (2MB PSRAM Double Buffered)</td></tr>
+          <tr><td><strong>RPi 4 Recording Buffer:</strong></td><td><code>/dev/shm</code> (Linux RAM Disk - <strong>0 SD Wear</strong>)</td></tr>
+          <tr><td><strong>Cloudflare R2 Bucket:</strong></td><td id="stat-r2-bucket">--</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 3: WEB SERIAL & CONTROLS -->
+    <div id="tab-serial" class="tab-content">
+      <div class="card" style="margin-bottom: 24px;">
+        <div class="card-title"><i class="fa-solid fa-sliders"></i> Remote ESP32 Control Center</div>
+        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+          <button class="btn btn-warning" onclick="sendReboot()">
+            <i class="fa-solid fa-rotate-right"></i> Reboot ESP32
+          </button>
+
+          <button class="btn" onclick="toggleFlashQuick()">
+            <i class="fa-solid fa-lightbulb"></i> Toggle Flashlight
+          </button>
+
+          <div style="display: flex; gap: 6px; align-items: center; background: #111422; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);">
+            <i class="fa-solid fa-bed" style="color: var(--text-muted);"></i>
+            <input type="number" id="sleep-val" value="60" style="width: 60px; background: #1a1d2e; color: #fff; border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px;">
+            <select id="sleep-unit" style="background: #1a1d2e; color: #fff; border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px;">
+              <option value="sec">Seconds</option>
+              <option value="min">Minutes</option>
+              <option value="ms">Milliseconds (ms)</option>
+            </select>
+            <button class="btn btn-danger btn-sm" onclick="sendDeepSleep()">Sleep ESP32</button>
+          </div>
+
+          <button class="btn btn-success" onclick="syncLogsToR2()">
+            <i class="fa-solid fa-cloud-arrow-up"></i> Archive Log to R2 Now
+          </button>
+
+          <a class="btn" href="/api/logs/download" target="_blank" style="margin-left: auto;">
+            <i class="fa-solid fa-file-arrow-down"></i> Download Raw .txt
+          </a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="terminal-toolbar">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <i class="fa-solid fa-terminal" style="color: var(--primary);"></i>
+            <strong>ESP32 Web Serial Monitor (Port 8100)</strong>
+            <span style="font-size: 12px; color: var(--text-muted);">(PSRAM Ring Buffer Stream)</span>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <label style="font-size: 12px; display: flex; align-items: center; gap: 4px; color: var(--text-muted); cursor: pointer;">
+              <input type="checkbox" id="auto-scroll-chk" checked> Auto Scroll
+            </label>
+            <button class="btn btn-sm" onclick="fetchLogs()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+            <button class="btn btn-sm btn-danger" onclick="clearTerminal()"><i class="fa-solid fa-trash"></i> Clear</button>
+          </div>
+        </div>
+
+        <div class="terminal-container" id="terminal-box">
+          <div class="log-line log-sys">[SYS] Web Serial Monitor Initialized. Connecting to ESP32:8100...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: CLOUDFLARE R2 RECORDINGS (8GB) -->
+    <div id="tab-recordings" class="tab-content">
+      <div class="storage-box">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div>
+            <h3 style="font-size: 18px; font-weight: 600;"><i class="fa-solid fa-film"></i> Cloudflare R2 Video Storage Quota</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">Capped strictly at 8.00 GB with FIFO automatic pruning of oldest motion clips.</p>
+          </div>
+          <div style="text-align: right;">
+            <div style="font-size: 22px; font-weight: 700; color: #a5b4fc;" id="r2-storage-text">0.00 / 8.00 GB</div>
+            <div style="font-size: 12px; color: var(--text-muted);" id="r2-file-count">0 recordings stored</div>
+          </div>
+        </div>
+        <div class="progress-bar-bg" style="height: 12px;"><div class="progress-bar-fill" id="r2-quota-bar" style="width: 0%;"></div></div>
+      </div>
+
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div class="card-title" style="margin-bottom: 0;"><i class="fa-solid fa-film"></i> Motion Video Clips</div>
+          <button class="btn btn-sm" onclick="fetchRecordings()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+        </div>
+
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Filename / Timestamp</th>
+                <th>Size</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="recordings-tbody">
+              <tr><td colspan="3" style="text-align: center; color: var(--text-muted);">Loading recordings from Cloudflare R2...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 5: CLOUDFLARE R2 LOG ARCHIVE (500MB) -->
+    <div id="tab-r2logs" class="tab-content">
+      <div class="storage-box" style="background: linear-gradient(135deg, #0e374e 0%, #1a1d2e 100%); border-color: #0284c7;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div>
+            <h3 style="font-size: 18px; font-weight: 600;"><i class="fa-solid fa-box-archive"></i> Cloudflare R2 Log Archive Quota</h3>
+            <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">Dedicated 500.0 MB quota for historical system & crash logs with auto FIFO pruning.</p>
+          </div>
+          <div style="text-align: right;">
+            <div style="font-size: 22px; font-weight: 700; color: #38bdf8;" id="r2-log-text">0.00 / 500.0 MB</div>
+            <div style="font-size: 12px; color: var(--text-muted);" id="r2-log-count">0 archives stored</div>
+          </div>
+        </div>
+        <div class="progress-bar-bg" style="height: 12px;"><div class="progress-bar-fill" id="r2-log-quota-bar" style="width: 0%; background: #0284c7;"></div></div>
+      </div>
+
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div class="card-title" style="margin-bottom: 0;"><i class="fa-solid fa-file-lines"></i> Historical Diagnostic Log Archives</div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-sm btn-success" onclick="syncLogsToR2()"><i class="fa-solid fa-cloud-arrow-up"></i> Archive Now</button>
+            <button class="btn btn-sm" onclick="fetchR2Logs()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Archive Name / Timestamp</th>
+                <th>Size</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="r2logs-tbody">
+              <tr><td colspan="3" style="text-align: center; color: var(--text-muted);">Loading log archives from Cloudflare R2...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 6: OTA UPDATE -->
+    <div id="tab-ota" class="tab-content">
+      <div class="ota-box">
+        <i class="fa-solid fa-cloud-arrow-up" style="font-size: 48px; color: var(--primary); margin-bottom: 16px;"></i>
+        <h2 style="margin-bottom: 8px;">ESP32-CAM OTA Firmware Update</h2>
+        <p style="font-size: 14px; color: var(--text-muted);">Upload a newly compiled <code>.bin</code> firmware file over Wi-Fi.</p>
+        
+        <div class="file-dropzone" onclick="document.getElementById('ota-file').click()">
+          <i class="fa-solid fa-file-code" style="font-size: 32px; color: var(--text-muted); margin-bottom: 10px;"></i>
+          <p id="file-name-display" style="font-size: 14px;">Click here to select <code>ESP32-CamV2.ino.bin</code></p>
+          <input type="file" id="ota-file" accept=".bin" style="display: none;" onchange="handleFileSelected(this)">
+        </div>
+
+        <div style="margin-bottom: 18px; text-align: left;">
+          <label style="font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 6px;">OTA Password:</label>
+          <input type="password" id="ota-password-input" value="admin" placeholder="Enter OTA password" style="width: 100%; background: #111422; border: 1px solid var(--border); padding: 10px; border-radius: 6px; color: #fff;">
+        </div>
+
+        <button class="btn" id="ota-upload-btn" style="width: 100%; justify-content: center; padding: 12px;" onclick="uploadOTA()">
+          <i class="fa-solid fa-bolt"></i> Flash ESP32 over Wi-Fi
+        </button>
+
+        <div class="progress-bar-bg" id="ota-progress-bar" style="display: none; margin-top: 20px; height: 10px;">
+          <div class="progress-bar-fill" id="ota-progress-fill" style="width: 0%;"></div>
+        </div>
+        <p id="ota-status-msg" style="margin-top: 12px; font-size: 13px; color: var(--text-muted);"></p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Video Playback Modal -->
+  <div class="modal" id="video-modal">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeVideoModal()">&times;</button>
+      <h3 id="modal-video-title" style="margin-bottom: 14px; font-size: 16px;">Motion Clip Playback</h3>
+      <video id="modal-video-player" controls autoplay style="width: 100%; border-radius: 6px; background: #000; max-height: 480px;"></video>
+    </div>
+  </div>
+
+  <script>
+    let currentFlashState = false;
+    let currentFlashBrightness = 0;
+    let isStreamPaused = false;
+
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      
+      event.currentTarget.classList.add('active');
+      document.getElementById('tab-' + tabId).classList.add('active');
+      
+      if (tabId === 'recordings') fetchRecordings();
+      if (tabId === 'r2logs') fetchR2Logs();
+      if (tabId === 'serial') fetchLogs();
+    }
+
+    // --- Stream Pause / Resume Toggle ---
+    async function toggleStreamPause() {
+      try {
+        const res = await fetch('/api/stream/toggle', { method: 'POST' });
+        const data = await res.json();
+        isStreamPaused = data.stream_paused;
+        updateStreamUI();
+      } catch (err) {
+        console.error('Failed to toggle stream pause:', err);
+      }
+    }
+
+    function updateStreamUI() {
+      const btn = document.getElementById('btn-pause-stream');
+      const icon = document.getElementById('icon-stream-pause');
+      const text = document.getElementById('text-stream-pause');
+      const overlay = document.getElementById('stream-paused-overlay');
+      const img = document.getElementById('live-stream-img');
+
+      if (isStreamPaused) {
+        overlay.style.display = 'flex';
+        btn.classList.add('btn-success');
+        icon.className = 'fa-solid fa-play';
+        text.innerText = 'Resume Stream';
+        img.src = '';
+      } else {
+        overlay.style.display = 'none';
+        btn.classList.remove('btn-success');
+        icon.className = 'fa-solid fa-pause';
+        text.innerText = 'Pause Stream';
+        if (!img.src.includes('/video_feed')) {
+          img.src = '/video_feed?' + new Date().getTime();
+        }
+      }
+    }
+
+    // --- Telemetry Polling ---
+    async function updateTelemetry() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) throw new Error('Offline');
+        const data = await res.json();
+
+        document.getElementById('esp-status-dot').classList.add('online');
+        document.getElementById('esp-status-text').innerText = 'ESP32 Connected (' + data.esp32_ip + ')';
+
+        // Stream Paused status sync
+        if (data.stream_paused !== undefined && isStreamPaused !== data.stream_paused) {
+          isStreamPaused = data.stream_paused;
+          updateStreamUI();
+        }
+
+        // Die Temp
+        const temp = data.temperature_c;
+        document.getElementById('stat-temp').innerText = temp.toFixed(1) + ' °C';
+        const tempBar = document.getElementById('temp-bar');
+        const tempIcon = document.getElementById('temp-icon');
+        const tempPercent = Math.min(Math.max((temp - 20) * 1.5, 10), 100);
+        tempBar.style.width = tempPercent + '%';
+        if (temp > 65) {
+          tempBar.style.background = 'var(--danger)';
+          tempIcon.style.color = 'var(--danger)';
+        } else if (temp > 55) {
+          tempBar.style.background = 'var(--warning)';
+          tempIcon.style.color = 'var(--warning)';
+        } else {
+          tempBar.style.background = 'var(--success)';
+          tempIcon.style.color = 'var(--success)';
+        }
+
+        // PSRAM
+        const psramFreeMB = (data.psram_free_bytes / (1024*1024)).toFixed(2);
+        const psramTotalMB = (data.psram_total_bytes / (1024*1024)).toFixed(2);
+        const psramMinMB = (data.psram_min_free_bytes / (1024*1024)).toFixed(2);
+        document.getElementById('stat-psram-free').innerText = psramFreeMB + ' MB Free';
+        document.getElementById('stat-psram-total').innerText = `Total: ${psramTotalMB} MB | Min: ${psramMinMB} MB`;
+        const psramUsedPercent = ((1 - data.psram_free_bytes / data.psram_total_bytes) * 100).toFixed(0);
+        document.getElementById('psram-bar').style.width = psramUsedPercent + '%';
+
+        // Heap
+        const heapFreeKB = (data.heap_free_bytes / 1024).toFixed(0);
+        const heapMinKB = (data.heap_min_free_bytes / 1024).toFixed(0);
+        document.getElementById('stat-heap-free').innerText = heapFreeKB + ' KB Free';
+        document.getElementById('stat-heap-min').innerText = `Lowest Min: ${heapMinKB} KB`;
+
+        // Wi-Fi RSSI
+        const rssi = data.wifi_rssi_dbm;
+        document.getElementById('stat-wifi-rssi').innerText = rssi + ' dBm';
+        let quality = 'Excellent';
+        let rssiPct = 100;
+        if (rssi < -80) { quality = 'Poor'; rssiPct = 25; }
+        else if (rssi < -70) { quality = 'Fair'; rssiPct = 50; }
+        else if (rssi < -60) { quality = 'Good'; rssiPct = 75; }
+        document.getElementById('stat-wifi-quality').innerText = `Signal Quality: ${quality}`;
+        document.getElementById('wifi-bar').style.width = rssiPct + '%';
+
+        // Flashlight status update
+        currentFlashState = data.flash_led || false;
+        currentFlashBrightness = data.flash_brightness || 0;
+        updateFlashUI();
+
+        // Quick cards & Motion
+        document.getElementById('quick-fps').innerText = isStreamPaused ? 'PAUSED' : (data.fps.toFixed(1) + ' FPS');
+        const motionBanner = document.getElementById('motion-banner');
+        const quickMotionState = document.getElementById('quick-motion-state');
+        if (data.motion_detected && !isStreamPaused) {
+          motionBanner.style.display = 'flex';
+          quickMotionState.innerText = 'MOTION DETECTED!';
+          quickMotionState.style.color = 'var(--danger)';
+        } else {
+          motionBanner.style.display = 'none';
+          quickMotionState.innerText = isStreamPaused ? 'STANDBY' : 'IDLE';
+          quickMotionState.style.color = isStreamPaused ? 'var(--warning)' : 'var(--success)';
+        }
+        document.getElementById('quick-motion-score').innerText = 'Motion score: ' + data.motion_score;
+
+        // Diagnostics
+        const up = data.uptime_seconds;
+        const hrs = Math.floor(up / 3600);
+        const mins = Math.floor((up % 3600) / 60);
+        const secs = up % 60;
+        document.getElementById('stat-uptime').innerText = `${hrs}h ${mins}m ${secs}s`;
+        document.getElementById('stat-reset-reason').innerText = data.reset_reason || 'Unknown';
+        document.getElementById('stat-clock-time').innerText = data.current_time || 'Syncing...';
+        document.getElementById('stat-r2-bucket').innerText = data.r2_bucket || 'N/A';
+
+      } catch (err) {
+        document.getElementById('esp-status-dot').classList.remove('online');
+        document.getElementById('esp-status-text').innerText = 'ESP32 Disconnected';
+      }
+    }
+
+    // --- Flashlight PWM UI & Controls ---
+    function updateFlashUI() {
+      const btn = document.getElementById('btn-flash-toggle');
+      const icon = document.getElementById('icon-flash');
+      const text = document.getElementById('text-flash');
+      const slider = document.getElementById('flash-slider');
+      const pct = document.getElementById('flash-pct');
+
+      if (currentFlashState && currentFlashBrightness > 0) {
+        btn.classList.add('btn-warning');
+        icon.style.color = '#000';
+        text.innerText = 'Flash: ON';
+      } else {
+        btn.classList.remove('btn-warning');
+        icon.style.color = 'var(--text-muted)';
+        text.innerText = 'Flash: OFF';
+      }
+
+      slider.value = currentFlashBrightness;
+      pct.innerText = Math.round((currentFlashBrightness / 255) * 100) + '%';
+    }
+
+    async function toggleFlashQuick() {
+      const newDuty = currentFlashState ? 0 : 128;
+      await setFlashBrightness(newDuty);
+    }
+
+    async function setFlashBrightness(val) {
+      val = parseInt(val);
+      try {
+        const res = await fetch('/api/cmd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'flash', val: val })
+        });
+        const data = await res.json();
+        currentFlashState = data.flash_led;
+        currentFlashBrightness = data.brightness;
+        updateFlashUI();
+      } catch (err) {
+        console.error('Failed to set flash:', err);
+      }
+    }
+
+    // --- Web Serial Terminal Logs ---
+    async function fetchLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        const data = await res.json();
+        const box = document.getElementById('terminal-box');
+
+        let html = '';
+        if (data.esp32_logs && data.esp32_logs.length > 0) {
+          data.esp32_logs.forEach(line => {
+            let cls = 'log-line';
+            if (line.includes('[SYS]')) cls += ' log-sys';
+            else if (line.includes('[MOTION]')) cls += ' log-motion';
+            else if (line.includes('BROWNOUT') || line.includes('CRASH') || line.includes('Failed') || line.includes('Error')) cls += ' log-err';
+            else if (line.includes('[PWR]') || line.includes('[OTA]') || line.includes('[LED]')) cls += ' log-pwr';
+            html += `<div class="${cls}">${escapeHtml(line)}</div>`;
+          });
+        } else {
+          html = '<div class="log-line log-sys">[SYS] Waiting for ESP32 logs from Port 8100...</div>';
+        }
+
+        box.innerHTML = html;
+        if (document.getElementById('auto-scroll-chk').checked) {
+          box.scrollTop = box.scrollHeight;
+        }
+      } catch (e) {}
+    }
+
+    function clearTerminal() {
+      document.getElementById('terminal-box').innerHTML = '<div class="log-line log-sys">[SYS] Console cleared.</div>';
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // --- Remote Control Actions ---
+    async function sendReboot() {
+      if (!confirm("Are you sure you want to reboot the ESP32?")) return;
+      try {
+        const res = await fetch('/api/cmd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'reboot' })
+        });
+        const data = await res.json();
+        alert(data.message || 'ESP32 Reboot command sent!');
+      } catch (err) {
+        alert('Failed to send reboot command: ' + err);
+      }
+    }
+
+    async function sendDeepSleep() {
+      const val = parseInt(document.getElementById('sleep-val').value) || 60;
+      const unit = document.getElementById('sleep-unit').value;
+      if (!confirm(`Put ESP32 into Deep Sleep for ${val} ${unit}? It will wake up automatically afterwards.`)) return;
+
+      const payload = { action: 'sleep' };
+      payload[unit] = val;
+
+      try {
+        const res = await fetch('/api/cmd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        alert(data.message || 'ESP32 entering Deep Sleep!');
+      } catch (err) {
+        alert('Failed to send sleep command: ' + err);
+      }
+    }
+
+    async function syncLogsToR2() {
+      try {
+        const res = await fetch('/api/logs/sync_r2', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'success') {
+          alert('Diagnostic logs archived to Cloudflare R2 successfully!');
+          fetchR2Logs();
+        } else {
+          alert('Archive error: ' + data.message);
+        }
+      } catch (err) {
+        alert('Failed to archive logs: ' + err);
+      }
+    }
+
+    // --- Cloudflare R2 Video Recordings (8GB) ---
+    async function fetchRecordings() {
+      try {
+        const res = await fetch('/api/recordings');
+        const data = await res.json();
+
+        const usedGB = (data.total_bytes / (1024*1024*1024)).toFixed(2);
+        const maxGB = data.max_storage_gb || 8.0;
+        const pct = Math.min((usedGB / maxGB) * 100, 100).toFixed(1);
+
+        document.getElementById('r2-storage-text').innerText = `${usedGB} / ${maxGB.toFixed(2)} GB`;
+        document.getElementById('quick-r2-usage').innerText = `${usedGB} / ${maxGB.toFixed(2)} GB`;
+        document.getElementById('r2-quota-bar').style.width = pct + '%';
+        document.getElementById('quick-r2-bar').style.width = pct + '%';
+        document.getElementById('r2-file-count').innerText = `${data.recordings.length} recordings stored`;
+
+        const tbody = document.getElementById('recordings-tbody');
+        if (data.recordings.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No motion recordings yet.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.recordings.map(r => `
+          <tr>
+            <td><i class="fa-solid fa-video" style="color: var(--primary); margin-right: 8px;"></i>${r.key}</td>
+            <td>${(r.size / (1024*1024)).toFixed(2)} MB</td>
+            <td>
+              <button class="btn btn-sm" onclick="playVideo('${r.url}', '${r.key}')"><i class="fa-solid fa-play"></i> Play</button>
+              <a class="btn btn-sm" href="${r.url}" download><i class="fa-solid fa-download"></i> Download</a>
+              <button class="btn btn-sm btn-danger" onclick="deleteRecording('${r.key}')"><i class="fa-solid fa-trash"></i></button>
+            </td>
+          </tr>
+        `).join('');
+
+      } catch (err) {
+        console.error("Error fetching recordings:", err);
+      }
+    }
+
+    // --- Cloudflare R2 Log Archives (500MB) ---
+    async function fetchR2Logs() {
+      try {
+        const res = await fetch('/api/r2_logs');
+        const data = await res.json();
+
+        const usedMB = (data.total_log_bytes / (1024*1024)).toFixed(2);
+        const maxMB = data.max_log_storage_mb || 500.0;
+        const pct = Math.min((usedMB / maxMB) * 100, 100).toFixed(1);
+
+        document.getElementById('r2-log-text').innerText = `${usedMB} / ${maxMB.toFixed(1)} MB`;
+        document.getElementById('quick-log-usage').innerText = `${usedMB} / ${maxMB.toFixed(1)} MB`;
+        document.getElementById('r2-log-quota-bar').style.width = pct + '%';
+        document.getElementById('quick-log-bar').style.width = pct + '%';
+        document.getElementById('r2-log-count').innerText = `${data.logs.length} archives stored`;
+
+        const tbody = document.getElementById('r2logs-tbody');
+        if (data.logs.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted);">No log archives stored yet.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.logs.map(l => `
+          <tr>
+            <td><i class="fa-solid fa-file-lines" style="color: #38bdf8; margin-right: 8px;"></i>${l.key}</td>
+            <td>${(l.size / 1024).toFixed(1)} KB</td>
+            <td>
+              <a class="btn btn-sm" href="${l.url}" target="_blank"><i class="fa-solid fa-eye"></i> View</a>
+              <a class="btn btn-sm" href="${l.url}" download><i class="fa-solid fa-download"></i> Download</a>
+              <button class="btn btn-sm btn-danger" onclick="deleteR2Log('${l.key}')"><i class="fa-solid fa-trash"></i></button>
+            </td>
+          </tr>
+        `).join('');
+
+      } catch (err) {
+        console.error("Error fetching R2 logs:", err);
+      }
+    }
+
+    async function deleteR2Log(key) {
+      if (!confirm(`Delete log archive ${key} from Cloudflare R2?`)) return;
+      await fetch('/api/r2_logs/' + encodeURIComponent(key), { method: 'DELETE' });
+      fetchR2Logs();
+    }
+
+    function playVideo(url, title) {
+      document.getElementById('modal-video-title').innerText = title;
+      const player = document.getElementById('modal-video-player');
+      player.src = url;
+      document.getElementById('video-modal').style.display = 'flex';
+      player.play();
+    }
+
+    function closeVideoModal() {
+      const player = document.getElementById('modal-video-player');
+      player.pause();
+      player.src = '';
+      document.getElementById('video-modal').style.display = 'none';
+    }
+
+    async function deleteRecording(key) {
+      if (!confirm(`Delete video ${key} from Cloudflare R2?`)) return;
+      await fetch('/api/recordings/' + encodeURIComponent(key), { method: 'DELETE' });
+      fetchRecordings();
+    }
+
+    // --- OTA Updates ---
+    function handleFileSelected(input) {
+      if (input.files && input.files[0]) {
+        document.getElementById('file-name-display').innerText = input.files[0].name;
+      }
+    }
+
+    async function uploadOTA() {
+      const fileInput = document.getElementById('ota-file');
+      if (!fileInput.files || !fileInput.files[0]) {
+        alert("Please select a .bin firmware file first.");
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const pwd = document.getElementById('ota-password-input').value;
+
+      const formData = new FormData();
+      formData.append("update", file);
+      formData.append("password", pwd);
+
+      const pBar = document.getElementById('ota-progress-bar');
+      const pFill = document.getElementById('ota-progress-fill');
+      const pMsg = document.getElementById('ota-status-msg');
+      const btn = document.getElementById('ota-upload-btn');
+
+      pBar.style.display = 'block';
+      pFill.style.width = '0%';
+      pMsg.innerText = 'Uploading firmware to ESP32:8100 over Wi-Fi...';
+      btn.disabled = true;
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/ota_upload", true);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          pFill.style.width = pct + '%';
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          pMsg.innerText = 'Firmware uploaded successfully! ESP32 is rebooting...';
+          pFill.style.background = 'var(--success)';
+        } else {
+          pMsg.innerText = 'OTA failed: ' + xhr.responseText;
+          pFill.style.background = 'var(--danger)';
+          btn.disabled = false;
+        }
+      };
+      xhr.onerror = () => {
+        pMsg.innerText = 'Connection error during OTA upload.';
+        pFill.style.background = 'var(--danger)';
+        btn.disabled = false;
+      };
+      xhr.send(formData);
+    }
+
+    setInterval(updateTelemetry, 1500);
+    setInterval(fetchLogs, 2000);
+    updateTelemetry();
+    fetchRecordings();
+    fetchR2Logs();
+  </script>
+</body>
+</html>
